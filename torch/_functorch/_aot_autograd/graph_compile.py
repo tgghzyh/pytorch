@@ -526,7 +526,11 @@ def _cache_inference_info(
     cache_info = aot_config.cache_info
 
     entry: GenericAOTAutogradResult[Any, Any] | None = None
-    if cache_info is not None and _should_save_cache(compiled_fw):
+    if (
+        cache_info is not None
+        and _should_save_cache(compiled_fw)
+        and AOTAutogradCache.can_save(cache_info)
+    ):
         time_taken_ns = time.time_ns() - cache_info.start_time_ns
         guards_expr = AOTAutogradCache.generate_guards_expression(cache_info)
         entry = AOTAutogradCache.make_entry(
@@ -2727,8 +2731,10 @@ def _cache_autograd_info(
         ) -> GenericAOTAutogradResult[Any, Any] | None:
             cache_info = aot_config.cache_info
 
-            if cache_info is not None and _should_save_cache(
-                compiled_fw_func, compiled_bw_func
+            if (
+                cache_info is not None
+                and _should_save_cache(compiled_fw_func, compiled_bw_func)
+                and AOTAutogradCache.can_save(cache_info)
             ):
                 if forward_time_taken_ns is None:
                     raise AssertionError("forward_time_taken_ns must not be None")

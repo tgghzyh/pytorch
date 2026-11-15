@@ -68,6 +68,7 @@ from torch.compiler._cache import (
 )
 from torch.fx.experimental.symbolic_shapes import guarding_hint_or_throw
 from torch.fx.node import Node
+from torch.utils._sympy.symbol import symbol_is_type, SymT
 from torch.utils._triton import has_triton_package
 
 from .aot_autograd_result import (
@@ -1372,6 +1373,35 @@ class AOTAutogradCache(GuardedCache[GenericAOTAutogradResult[Any, Any]]):
         )
 
         return compiled_fn, aot_config
+
+    @classmethod
+    def can_save(cls: type[AOTAutogradCache], cache_info: AOTAutogradCacheInfo) -> bool:
+        """
+        Entries are guarded only on input SymInts, so a guard on a float
+        symbol would be dropped and the entry would hit for any value.
+        """
+        shape_env = cls._get_shape_env()
+        if shape_env is None:
+            return True
+        float_guard = next(
+            (
+                g
+                for g in shape_env.guards
+                if any(
+                    symbol_is_type(s, (SymT.FLOAT, SymT.UNBACKED_FLOAT))
+                    for s in g.expr.free_symbols
+                )
+            ),
+            None,
+        )
+        if float_guard is None:
+            return True
+        AOTAutogradCache._handle_save_error(
+            BypassAOTAutogradCache(f"guard on float symbol: {float_guard.expr}"),
+            should_use_remote_autograd_cache(),
+            is_bypass=True,
+        )
+        return False
 
     @classmethod
     def generate_guards_expression(
