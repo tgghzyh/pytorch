@@ -1871,14 +1871,18 @@ class TestShardedTensorEnumerable(ShardedTensorTestBase):
             ],
         )
         h, w = 10, 20
-        # Accelerator sharded tensor should return a new ShardedTensor, but same
-        # local shards(no movements)
-        st_accelerator = sharded_tensor.zeros(spec, h, w)
-        new_st_accelerator = st_accelerator.to(DEVICE_TYPE)
-        self.assertTrue(st_accelerator is not new_st_accelerator)
-        self.assertTrue(
-            st_accelerator.local_tensor() is new_st_accelerator.local_tensor()
-        )
+
+        if DEVICE_TYPE == "cuda":
+            # On-device sharded tensor should return a new ShardedTensor, but same
+            # local shards (no movements). This is .cuda()-specific: it always
+            # returns a new object, whereas .to(device) returns self when the
+            # tensor is already on that device.
+            st_accelerator = sharded_tensor.zeros(spec, h, w)
+            new_st_accelerator = st_accelerator.cuda()
+            self.assertTrue(st_accelerator is not new_st_accelerator)
+            self.assertTrue(
+                st_accelerator.local_tensor() is new_st_accelerator.local_tensor()
+            )
 
         gloo_pg = dist.new_group(backend="gloo")
 

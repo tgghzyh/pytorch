@@ -56,7 +56,6 @@ from torch.testing._internal.common_device_type import (
     expectedFailureXLA,
     instantiate_device_type_tests,
     onlyCUDA,
-    onlyOn,
     onlyCPU,
     preserves_device_selection,
     dtypes, dtypesIfCUDA, dtypesIfCPU, dtypesIfXPU, deviceCountAtLeast,
@@ -2187,7 +2186,7 @@ class TestTorchDeviceType(TestCase):
         t.bernoulli_(0.5)
         self.assertTrue(isBinary(t))
 
-        for p_dtype in floating_types_and(*[torch.half] if device.startswith('cuda') or device.startswith('xpu') else []):
+        for p_dtype in floating_types_and(*[torch.half] if device.startswith(('cuda', 'xpu')) else []):
             p = torch.rand(10, dtype=p_dtype, device=device).expand(10, 10)
             t.fill_(2)
             t.bernoulli_(p)
@@ -7436,7 +7435,7 @@ class TestTorchDeviceType(TestCase):
         # Whichever path zero_ takes has to survive being captured and replayed.
         base = torch.ones(64, 96, device=device)
         dev = torch.get_device_module(device)
-        graph = torch.accelerator.Graph()
+        graph = torch.cuda.CUDAGraph() if self.device_type == "cuda" else torch.accelerator.Graph()
         stream = dev.Stream()
         stream.wait_stream(dev.current_stream())
         with dev.stream(stream):
