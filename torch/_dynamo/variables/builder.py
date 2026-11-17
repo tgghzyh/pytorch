@@ -121,7 +121,12 @@ from torch.utils.weak import TensorWeakRef
 from .. import config, graph_break_hints, mutation_guard, replay_record, trace_rules
 from ..device_interface import get_registered_device_interfaces
 from ..exc import InternalTorchDynamoError, raise_observed_exception, unimplemented
-from ..guards import GuardBuilder, install_guard, make_dupe_guard
+from ..guards import (
+    GuardBuilder,
+    install_builtin_method_guard,
+    install_guard,
+    make_dupe_guard,
+)
 from ..pgo import (
     auto_dynamic,
     auto_unset,
@@ -666,7 +671,7 @@ def lookup_spec_from_dynamo_source(
 
 
 def bound_builtin_method_descriptor(value: Any) -> Any | None:
-    if not isinstance(value, types.BuiltinMethodType):
+    if not issubclass(type(value), types.BuiltinMethodType):
         return None
 
     method_self = value.__self__
@@ -1712,7 +1717,10 @@ class VariableBuilder:
         elif istype(value, frozenset) and all(
             (
                 # For DBR quantization, we could get a frozenset of torch funcs.
-                (type(x) is types.BuiltinMethodType and x.__module__ == "torch")
+                (
+                    issubclass(type(x), types.BuiltinMethodType)
+                    and x.__module__ == "torch"
+                )
                 or
                 # Another commonly used frozenset of types.
                 x in torch.utils._pytree.BUILTIN_TYPES
@@ -1879,7 +1887,7 @@ class VariableBuilder:
                 ),
             )
         elif (
-            isinstance(value, types.MethodType)
+            issubclass(type(value), (types.MethodType, types.BuiltinMethodType))
             and istype(
                 getattr(value, "__self__", None), torch.autograd.function.FunctionMeta
             )
@@ -1887,19 +1895,22 @@ class VariableBuilder:
             and value == getattr(value.__self__, "apply", None)
         ):
             # handle aliased autograd function `apply` calls
+            obj_source = AttrSource(self.source, "__self__")
+            obj = VariableBuilder(self.tx, obj_source)(value.__self__)
+            if isinstance(value, types.BuiltinMethodType):
+                self.install_guards(GuardBuilder.BUILTIN_MATCH)
+                descriptor = cast(Any, find_bound_builtin_method_descriptor(value))
+                if descriptor is None:
+                    raise AssertionError("Expected builtin apply descriptor")
+                return BoundBuiltinMethodVariable(
+                    descriptor, obj, value=value, source=self.source
+                )
             install_guard(
                 AttrSource(self.get_source(), "__func__").make_guard(
                     GuardBuilder.CLOSURE_MATCH
                 )
             )
-            return GetAttrVariable(
-                AutogradFunctionVariable(
-                    value.__self__,
-                    source=AttrSource(self.source, member="__self__"),
-                ),
-                "apply",
-                py_type=type(value),
-            )
+            return GetAttrVariable(obj, "apply", py_type=type(value))
         elif (
             isinstance(value, types.MethodType)
             and value.__name__ in ("shuffle", "sample", "seed")
@@ -1918,7 +1929,7 @@ class VariableBuilder:
             obj_vt = VariableTracker.build(self.tx, random_self, obj_source)
             return GetAttrVariable(obj_vt, value.__name__, py_type=type(value))
         elif (
-            isinstance(value, types.BuiltinMethodType)
+            issubclass(type(value), types.BuiltinMethodType)
             and isinstance(value.__self__, random.Random)
             and RandomVariable.is_supported_random_obj(value.__self__)
             and value in UserDefinedObjectVariable._supported_random_functions()
@@ -2291,7 +2302,7 @@ class VariableBuilder:
                         explanation="Dynamo cannot safely wrap the class receiver without invoking metaclass hooks.",
                         hints=[*graph_break_hints.SUPPORTABLE],
                     )
-            self.install_guards(GuardBuilder.ID_MATCH)
+            install_builtin_method_guard(self.tx, self.source, value)
             obj_source = self.source and AttrSource(self.source, "__self__")
             obj_vt = VariableTracker.build(self.tx, method_self, obj_source)
             return BoundBuiltinMethodVariable(
@@ -2401,30 +2412,32 @@ class VariableBuilder:
             self.install_guards(GuardBuilder.TYPE_MATCH)
             result = PropertyVariable(value, source=self.source)
             return self.tx.output.side_effects.track_object_existing(value, result)
-        elif isinstance(value, types.MethodWrapperType):
-            # Attribute lookup can create a fresh method-wrapper. For descriptor
-            # receivers, guard the receiver and operation instead of wrapper identity.
-            descriptor = inspect.getattr_static(type(value.__self__), value.__name__)
+        elif type(value) is types.MethodWrapperType:
+            # Fresh wrappers can bind a base slot on a subclass. Guard the binding,
+            # rather than wrapper identity, so equivalent fresh wrappers can reuse graphs.
+            descriptor = inspect.getattr_static(value.__objclass__, value.__name__)
             if not isinstance(descriptor, types.WrapperDescriptorType):
                 raise AssertionError(
                     f"expected WrapperDescriptorType, got {type(descriptor)}"
                 )
             obj_source = self.source and AttrSource(self.source, "__self__")
-            if (
-                obj_source is not None
-                and not is_constant_source(obj_source)
-                and isinstance(
-                    value.__self__,
-                    (types.GetSetDescriptorType, types.MemberDescriptorType),
-                )
-            ):
+            if obj_source is not None and not is_constant_source(obj_source):
                 self.install_guards(GuardBuilder.TYPE_MATCH)
                 install_guard(
                     AttrSource(self.source, "__name__").make_guard(
                         GuardBuilder.EQUALS_MATCH
                     )
                 )
-                install_guard(obj_source.make_guard(GuardBuilder.ID_MATCH))
+                install_guard(
+                    AttrSource(self.source, "__objclass__").make_guard(
+                        GuardBuilder.BUILTIN_MATCH
+                    )
+                )
+                if isinstance(
+                    value.__self__,
+                    (types.GetSetDescriptorType, types.MemberDescriptorType),
+                ):
+                    install_guard(obj_source.make_guard(GuardBuilder.ID_MATCH))
             obj_vt = VariableTracker.build(self.tx, value.__self__, obj_source)
             return MethodWrapperVariable(descriptor, obj_vt)
         elif issubclass(type(value), type) and issubclass(value, BaseException):
@@ -5951,8 +5964,8 @@ class SourcelessBuilder:
             if issubclass(type(value), type) and issubclass(value, BaseException):
                 return UserDefinedExceptionClassVariable(value)
             return UserDefinedClassVariable(value)
-        elif isinstance(value, types.MethodWrapperType):
-            descriptor = inspect.getattr_static(type(value.__self__), value.__name__)
+        elif type(value) is types.MethodWrapperType:
+            descriptor = inspect.getattr_static(value.__objclass__, value.__name__)
             if not isinstance(descriptor, types.WrapperDescriptorType):
                 raise AssertionError(
                     f"expected WrapperDescriptorType, got {type(descriptor)}"
