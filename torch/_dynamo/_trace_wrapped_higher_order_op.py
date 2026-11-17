@@ -100,6 +100,8 @@ def _(info, indims, shape, indices, value):  # type: ignore[no-untyped-def]
     return out, None
 
 
+# torch.export.save stores this qualified name, so files that call it stop
+# loading if it moves.
 class ModIndex(torch.autograd.Function):
     generate_vmap_rule = True
 

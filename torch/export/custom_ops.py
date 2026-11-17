@@ -33,6 +33,8 @@ def _access_subclass_inner_tensor(
     return val
 
 
+# torch.export.save stores this qualified name, so files that call it stop
+# loading if it moves.
 def _call_custom_autograd_function_in_pre_dispatch(function_cls_name, *args, **kwargs):
     """
     Import a custom autograd function by string name and call it. This is pretty bad
