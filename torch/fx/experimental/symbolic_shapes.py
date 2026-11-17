@@ -897,6 +897,15 @@ def _canonicalize_bool_expr_impl(expr: SympyBoolean) -> SympyBoolean:
             evaluate=False,
         )
 
+    # Positive integer bounds on a single dimension are already in lowest terms.
+    symbol, bound = (lhs, rhs) if isinstance(rhs, sympy.Integer) else (rhs, lhs)
+    if (
+        type(symbol) is sympy.Symbol
+        and symbol.is_integer is True
+        and isinstance(bound, sympy.Integer)
+        and bound.is_positive
+    ):
+        return expr if t is type(expr) else t(lhs, rhs, evaluate=False)
     rhs = rhs - lhs
 
     def is_neg(t: sympy.Expr) -> bool:
@@ -3389,7 +3398,9 @@ class DimConstraints:
             new_n_congruences = len(self._congruences[s])
             if expr == sympy.true:
                 return old_n_congruences == new_n_congruences
-            reduced = expr.xreplace(self._var_to_val)
+            reduced = (
+                orig_reduced if expr is orig_expr else expr.xreplace(self._var_to_val)
+            )
             if reduced == sympy.false:
                 self._inconsistencies.append(
                     f"{expr}, obtained by rewriting {orig_expr} with congruences, "
@@ -4298,6 +4309,10 @@ class ShapeEnv:
         # SymNode's binary_magic_impl for why two sites cannot share one. Under
         # proxy tracing binary_magic_impl returns before it reaches this cache,
         # so nothing being traced is served from here.
+        self._implications_cache: dict[
+            SympyBoolean,
+            tuple[tuple[SympyBoolean, sympy.logic.boolalg.BooleanAtom], ...],
+        ] = {}
         self._symop_cache: dict[Any, Any] = {}
         self._symop_cache_version = 0
 
@@ -4503,6 +4518,7 @@ class ShapeEnv:
             "var_to_range_sloc",
             "replacements_slocs",
             "_replacements_version_counter",
+            "_implications_cache",
             "_symop_cache",
             "_symop_cache_version",
             "_resimplify_floor_div_axioms",
@@ -6942,12 +6958,13 @@ class ShapeEnv:
                 else:
                     verbose_expr = f"{rf} <= {r.upper}  # {vr_sloc.upper}"
             if bounds:
-                bound = sympy.And(*bounds, evaluate=False)
-
                 for exprs, printer, lang in zip(all_exprs, printers, langs):
                     if lang == "verbose_python":
                         exprs.append(verbose_expr)
+                    elif lang == "python" and len(bounds) == 2 and r.is_int:
+                        exprs.append(f"{r.lower} <= {rf} and {rf} <= {r.upper}")
                     else:
+                        bound = sympy.And(*bounds, evaluate=False)
                         exprs.append(printer.doprint(bound))
                 # NB: verbose_exprs are done above
 
@@ -7353,11 +7370,12 @@ class ShapeEnv:
             )
         return tuple(dict.fromkeys(axioms).keys())
 
-    @lru_cache(None)
     def get_implications(
         self, e: SympyBoolean
     ) -> tuple[tuple[SympyBoolean, sympy.logic.boolalg.BooleanAtom], ...]:
         """Given a expression, it returns a list of predicates that follow from it"""
+        if (cached := self._implications_cache.get(e)) is not None:
+            return cached
         equiv: dict[SympyBoolean, sympy.logic.boolalg.BooleanAtom] = {}
 
         def add_expr(expr: SympyBoolean) -> None:
@@ -7392,7 +7410,8 @@ class ShapeEnv:
         elif isinstance(e, sympy.Le):
             add_expr(sympy.Lt(e.lhs, e.rhs + 1, evaluate=False))
 
-        return tuple(equiv.items())
+        self._implications_cache[e] = result = tuple(equiv.items())
+        return result
 
     def _is_nonneg_term(self, term: sympy.Expr) -> bool:
         """Check if a single term is non-negative (symbol with non-neg range or non-neg constant)."""
@@ -8106,7 +8125,7 @@ class ShapeEnv:
             changed = True
         else:
             old = self.var_to_range[symbol]
-            new = old & vr
+            new = vr if old.is_int and vr.is_int and vr.issubset(old) else old & vr
             changed = new != old
             if changed:
                 if vr_sloc is None:
