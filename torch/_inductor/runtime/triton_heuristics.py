@@ -515,6 +515,8 @@ def check_autotune_cache(
                     best_config
                 )
                 autotune_cache_info["autotune_cache_state"] = "hit"
+                if getattr(best_config, "found_by_coordesc", False):
+                    autotune_cache_info["found_by_coordesc"] = True
 
             else:
                 autotune_cache_info["autotune_cache_state"] = "miss"
@@ -749,6 +751,19 @@ class CachingAutotuner(KernelInterface):
         self.cuda_kernel_saved = False
         self.cpu_kernel_saved = False
         self.autotune_cache_info = autotune_cache_info
+        # Hash of the config that a previous run's coordinate descent picked
+        # (an autotune cache hit). triton.Config.__setstate__ only restores its
+        # own fields, so the ``found_by_coordesc`` attribute on the config is
+        # lost whenever it is unpickled (compile workers, FX graph cache
+        # bundles). This autotuner attribute is pickled with ``__dict__``, so it
+        # survives and lets run() skip re-tuning the cached winner.
+        self.coordesc_winner_hash: Hashable | None = (
+            triton_config_to_hashable(configs[0])
+            if autotune_cache_info
+            and autotune_cache_info.get("found_by_coordesc")
+            and len(configs) == 1
+            else None
+        )
         if log.isEnabledFor(logging.DEBUG):
             log.debug(
                 "CachingAutotuner gets %d configs for %s",
@@ -901,6 +916,9 @@ class CachingAutotuner(KernelInterface):
             # Grab the best compiled config, if it's in the list of available ones
             best_config_hash = triton_config_to_hashable(best_config)
 
+            self.coordesc_winner_hash = (
+                best_config_hash if found_by_coordesc else None
+            )
             for compile_result in self.compile_results:
                 if triton_config_to_hashable(compile_result.config) == best_config_hash:
                     compile_result.config.found_by_coordesc = found_by_coordesc
@@ -2525,6 +2543,15 @@ class CachingAutotuner(KernelInterface):
         )
         self.cpu_kernel_saved = True
 
+    def _found_by_coordesc(self, config: Config) -> bool:
+        """Whether ``config`` is already a coordinate descent winner."""
+        if getattr(config, "found_by_coordesc", False):
+            return True
+        winner_hash = getattr(self, "coordesc_winner_hash", None)
+        return winner_hash is not None and (
+            triton_config_to_hashable(config) == winner_hash
+        )
+
     @functools.cached_property
     def _should_coordesc_tune(self) -> bool:
         """Whether this autotuner is eligible for coordinate descent tuning."""
@@ -2792,8 +2819,8 @@ class CachingAutotuner(KernelInterface):
                     self._combo_sequential_autotune(self.launchers[0], *args, **kwargs)
                 ]
 
-        if not getattr(
-            self.launchers[0].config, "found_by_coordesc", False
+        if not self._found_by_coordesc(
+            self.launchers[0].config
         ) and self.inductor_meta.get("coordinate_descent_tuning", False):
             self.launchers = [
                 self.coordinate_descent_tuning(self.launchers[0], *args, **kwargs)
