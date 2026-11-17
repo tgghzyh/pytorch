@@ -57,12 +57,22 @@ a new one is added, the difference should be documented.
 Public declarations must use stable or header-only types and headers. They must
 not expose ATen or other unstable implementation types. Route C shim failures
 through `STABLE_TORCH_ERROR_CODE_CHECK` NOT the outdated `TORCH_ERROR_CODE_CHECK`.
+Reuse the stable IValue `from`/`to` helpers for boxing and unboxing. Prefer direct
+code over extra conversion layers added solely to avoid a few duplicated lines.
 
 For handles and callbacks, verify the ownership contract explicitly: borrowed
 versus owned handles, shared value semantics, who releases the resource, and
 whether a callback runs exactly once. Match the unstable type's RAII behavior
 rather than creating a new lifetime model, and derive inspiration from how
 lifetime is handled by existing stable IValues.
+
+Document ownership at the declarations of C shims, constructors, and conversion
+helpers. State whether inputs and outputs are borrowed or owned, which calls
+acquire or release references, and which transfer an existing reference without
+changing its count. Describe the source object's state after a transfer and
+whether plain inline values require any reference management. Distinguish
+numeric inputs from encoded owning words; copying a word's bits does not acquire
+a reference.
 
 Keep the patch limited to the wrapper, its required ABI plumbing, and focused
 tests. Unrelated refactors and speculative convenience APIs make compatibility
@@ -75,10 +85,15 @@ the `TORCH_FEATURE_VERSION` guard on the oldest runtime whose shim or dispatcher
 contract can support the wrapper, not simply on the version in which the C++
 wrapper is added.
 
+Document both the build time minimum version and the minimum compatible runtime
+on public APIs, following the `view.dtype` example in [`ops.h`](ops.h).
+
 Verify that the unstable declaration or dispatcher schema has not changed over
 the runtime range the wrapper promises to support. New C shims must be recorded
 and guarded according to the stable shim versioning rules. Put the test in the
 lowest `libtorch_agn` version target that the wrapper claims to support.
+When changing dispatcher encodings, check existing callers against the new
+runtime for both arguments and returns, including list and optional elements.
 
 ## Test the wrapper boundary
 
@@ -87,6 +102,10 @@ Add focused coverage under
 `test/cpp_extensions/test_libtorch_agnostic.py`. The test should compile the
 stable declaration with the intended `TORCH_TARGET_VERSION` and call the
 `torch::stable` API itself.
+
+Keep C++ test helpers small and generic: prefer using parametrization at the Python
+level. Input construction and case selection should go in Python rather than
+hard-coding scenarios in C++.
 
 These tests prove that the shim preserves access to the API; they do not need to
 re-prove the underlying operator. One representative end-to-end case is enough
