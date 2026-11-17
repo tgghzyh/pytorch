@@ -11,6 +11,7 @@ import logging
 import math
 import operator
 import textwrap
+import warnings
 from collections import Counter
 from typing import Any, cast, Generic, NamedTuple, TYPE_CHECKING
 from typing_extensions import TypeVar
@@ -27,12 +28,7 @@ from torch.fx.experimental.symbolic_shapes import free_unbacked_symbols
 from torch.fx.immutable_collections import immutable_dict
 from torch.utils._ordered_set import OrderedSet
 from torch.utils._sympy.functions import FloorDiv, Identity, ModularIndexing
-from torch.utils._sympy.symbol import (
-    free_symbol_is_type,
-    prefix_str,
-    symbol_is_type,
-    SymT,
-)
+from torch.utils._sympy.symbol import free_symbol_is_type, symbol_is_type, SymT
 
 from ..._dynamo.utils import counters
 from .. import config, ir, scheduler
@@ -107,18 +103,17 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 perf_hint_log = torch._logging.getArtifactLogger(__name__, "perf_hints")
+
 schedule_log = torch._logging.getArtifactLogger(__name__, "schedule")
 fusion_log = torch._logging.getArtifactLogger(__name__, "fusion")
 
 
 pexpr = PythonPrinter().doprint
 
-TRITON_MAX_TENSOR_DIMS = 5
-
 
 def get_max_tiles(default: int = 2) -> int:
     max_tiles = torch._inductor.config.triton.max_tiles
-    return max_tiles if max_tiles is not None else default
+    return max(1, max_tiles if max_tiles is not None else default)
 
 
 @dataclasses.dataclass
@@ -683,11 +678,7 @@ class SIMDKernel(Kernel[CSEVariableType], Generic[CSEVariableType]):
                 val: idx for idx, val in enumerate(val for val in seq if val in mask)
             }
 
-        grid_dims = (
-            prefix_str[SymT.XBLOCK],
-            prefix_str[SymT.YBLOCK],
-            *get_z_prefixes(numels),
-        )
+        grid_dims = tuple(reversed(pointwise_tensor_dims))
         if no_x_dim:
             tensor_dims = reduction_dims
         elif no_r_dim:
@@ -698,7 +689,7 @@ class SIMDKernel(Kernel[CSEVariableType], Generic[CSEVariableType]):
         # Filter out unused tensor dims.
         # Convert to dicts for O(1) index lookup.
         tensor_dim_map = filtered_index_map(tensor_dims, active_prefixes)
-        grid_dim_map = dict(zip(grid_dims, range(len(grid_dims))))
+        grid_dim_map = {p: min(i, 2) for i, p in enumerate(grid_dims)}
 
         range_trees = []
         persistent_reduction = (
@@ -6071,7 +6062,9 @@ class SIMDScheduling(BaseScheduling):
                     (sympy.S.One,)
                     if is_pointwise
                     else tile_var_ranges(
-                        reduction_var_ranges, node_ranges[1], reduction_numel
+                        reduction_var_ranges,
+                        node_ranges[1],
+                        reduction_numel,
                     )
                 )
 
@@ -6083,15 +6076,6 @@ class SIMDScheduling(BaseScheduling):
             for pointwise_tiling, reduction_tiling in itertools.product(
                 *zip(*node_tilings)
             ):
-                if (
-                    len(pointwise_tiling) + len(reduction_tiling)
-                    > TRITON_MAX_TENSOR_DIMS
-                ):
-                    pointwise_tiling = collapse_dims(
-                        pointwise_tiling,
-                        pointwise_numel,
-                        TRITON_MAX_TENSOR_DIMS - len(reduction_tiling),
-                    )
                 tilings.add(cls.create_tiling(pointwise_tiling, reduction_tiling))
 
         # Rank tilings by the number of dimensions. E.g., prefer 2D to 1D.
@@ -6257,8 +6241,19 @@ class SIMDScheduling(BaseScheduling):
                 )
             )
 
-        if get_max_tiles(default=3) == 3 and reduction_numel == 1:
-            for vars_to_use in itertools.combinations(overlapping_iter_vars, 2):
+        if reduction_numel == 1:
+            max_tiles = get_max_tiles(default=3)
+            if max_tiles > 3:
+                warnings.warn(
+                    "Coalescing tiling analysis enumerates variable combinations and "
+                    "can have high compilation cost when triton.max_tiles > 3. "
+                    "Consider setting triton.prefer_nd_tiling=True instead.",
+                    stacklevel=2,
+                )
+            for vars_to_use in itertools.chain.from_iterable(
+                itertools.combinations(overlapping_iter_vars, n)
+                for n in range(2, min(max_tiles, len(overlapping_iter_vars) + 1))
+            ):
                 score_split.append(
                     (
                         process_node_vars(vars_to_use, is_pointwise=True),
@@ -6328,7 +6323,10 @@ class SIMDScheduling(BaseScheduling):
                 or cand.tiling == default_tiling
             ):
                 # we always include default reduction numel == 1, don't include
-                tiling_len = len(cand.tiling) - (1 if reduction_numel == 1 else 0)
+                tiling_len = max(
+                    len(get_pointwise_prefixes(cand.tiling)),
+                    len(get_reduction_prefixes(cand.tiling)),
+                )
                 if tiling_len > get_max_tiles(default=3):
                     perf_hint_log.info(
                         "Found optimal tiling with %s tiles but torch._inductor.config.triton.max_tiles "
