@@ -228,6 +228,9 @@ class ConstDictVariable(VariableTracker):
             for k, v in self.items.items()
         }
 
+    def can_load_const_for_codegen(self) -> bool:
+        return False
+
     def tp_repr_impl(self, tx: "InstructionTranslatorBase") -> VariableTracker:
         items = [
             f"{tracked_repr(tx, key.vt)}: {tracked_repr(tx, value)}"

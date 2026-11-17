@@ -1442,6 +1442,9 @@ class GetAttrVariable(VariableTracker):
         except AttributeError:
             raise NotImplementedError(f"{self} is not a constant") from None
 
+    def can_load_const_for_codegen(self) -> bool:
+        return False
+
     def hash_impl(self, tx: "InstructionTranslatorBase") -> tuple[int, bool]:
         # GetAttrVariable can wrap various types (bound methods, descriptors,
         # etc.) with different C tp_hash.  Resolve to the actual value and hash.
@@ -1572,6 +1575,9 @@ class CallMethodVariable(VariableTracker):
 
     def as_python_constant(self) -> Any:
         return self._bind_python_constant(self.obj.as_python_constant())
+
+    def can_load_const_for_codegen(self) -> bool:
+        return False
 
     def hash_impl(self, tx: "InstructionTranslatorBase") -> tuple[int, bool]:
         is_constant, obj = self.obj.try_as_python_constant()

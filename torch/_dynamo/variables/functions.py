@@ -2282,6 +2282,9 @@ class NestedUserFunctionVariable(BaseUserFunctionVariable):
     def as_python_constant(self) -> types.FunctionType:
         return self.get_function()
 
+    def can_load_const_for_codegen(self) -> bool:
+        return False
+
     def tp_repr_impl(self, tx: "InstructionTranslatorBase") -> "VariableTracker":
         try:
             return super().tp_repr_impl(tx)
@@ -3617,6 +3620,9 @@ class FunctoolsPartialVariable(VariableTracker):
     def python_type(self) -> type:
         return functools.partial
 
+    def can_load_const_for_codegen(self) -> bool:
+        return False
+
     def reconstruct(self, codegen: "PyCodegen") -> None:
         codegen.add_push_null(lambda: codegen.load_import_from("functools", "partial"))
         codegen(self.func)
@@ -4772,15 +4778,18 @@ class MethodWrapperVariable(VariableTracker):
         except NotImplementedError:
             return False, None
 
+    def can_load_const_for_codegen(self) -> bool:
+        return False
+
+    def as_python_constant(self) -> types.MethodWrapperType:
+        obj_value = self.obj.as_python_constant()
+        return self._bind_python_constant(obj_value)
+
     def _bind_python_constant(self, obj_value: Any) -> types.MethodWrapperType:
         try:
             return self.descriptor.__get__(obj_value, type(obj_value))
         except TypeError:
             raise AsPythonConstantNotImplementedError(self) from None
-
-    def as_python_constant(self) -> types.MethodWrapperType:
-        obj_value = self.obj.as_python_constant()
-        return self._bind_python_constant(obj_value)
 
     def call_function(
         self,
@@ -5023,13 +5032,6 @@ class BoundBuiltinMethodVariable(VariableTracker):
         except NotImplementedError:
             return NO_SUCH_SUBOBJ
 
-    def _bind_python_constant(self, obj: Any) -> Any:
-        if isinstance(self.descriptor, types.ClassMethodDescriptorType):
-            return self.descriptor.__get__(None, obj)
-        if hasattr(self.descriptor, "__get__"):
-            return self.descriptor.__get__(obj)  # type: ignore[union-attr]
-        return getattr(obj, self.descriptor.__name__)
-
     def hash_impl(self, tx: "InstructionTranslatorBase") -> tuple[int, bool]:
         # meth_hash: https://github.com/python/cpython/blob/e76aa128fe/Objects/methodobject.c#L319
         is_constant, obj = self.obj.try_as_python_constant()
@@ -5045,9 +5047,19 @@ class BoundBuiltinMethodVariable(VariableTracker):
 
         return object_richcompare(self, tx, other, op)
 
+    def can_load_const_for_codegen(self) -> bool:
+        return False
+
     def as_python_constant(self) -> Any:
         obj = self.obj.as_python_constant()
         return self._bind_python_constant(obj)
+
+    def _bind_python_constant(self, obj: Any) -> Any:
+        if isinstance(self.descriptor, types.ClassMethodDescriptorType):
+            return self.descriptor.__get__(None, obj)
+        if hasattr(self.descriptor, "__get__"):
+            return self.descriptor.__get__(obj)  # type: ignore[union-attr]
+        return getattr(obj, self.descriptor.__name__)
 
     def call_function(
         self,
@@ -5211,6 +5223,9 @@ class StaticMethodVariable(VariableTracker):
     def as_python_constant(self) -> staticmethod:  # type: ignore[type-arg]
         return staticmethod(self.descriptor.as_python_constant())
 
+    def can_load_const_for_codegen(self) -> bool:
+        return False
+
     def lookup_instance_dict(
         self, tx: "InstructionTranslatorBase", name: str
     ) -> VariableTracker | None:
@@ -5290,6 +5305,9 @@ class ClassMethodVariable(VariableTracker):
 
     def as_python_constant(self) -> classmethod:  # type: ignore[type-arg]
         return classmethod(self.descriptor.as_python_constant())
+
+    def can_load_const_for_codegen(self) -> bool:
+        return False
 
     def lookup_instance_dict(
         self, tx: "InstructionTranslatorBase", name: str
