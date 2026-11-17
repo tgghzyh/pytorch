@@ -49,7 +49,6 @@ from torch.testing._internal.common_utils import (
     IS_WINDOWS,
     parametrize,
     skipIfXpu,
-    TEST_ACCELERATOR,
     TEST_CUDA,
 )
 from torch.testing._internal.inductor_utils import GPU_TYPE, HAS_TRITON, requires_triton
@@ -2756,7 +2755,7 @@ cos: aten.cos.default -> PREFER_RECOMPUTE""",
         self.assertIsNotNone(x.grad)
         self.assertEqual(budgets, [0.3, 0.3])
 
-    @unittest.skipIf(not TEST_ACCELERATOR, "requires Accelerator")
+    @torch._dynamo.config.patch(inline_single_use_invoke_subgraph=False)
     def test_region_activation_memory_budget_distinct_per_invoke_subgraph_raises(self):
         """Different budgets in two invoke_subgraph regions of a single graph are
         rejected: the agreement check recurses into nested subgraphs, so the
@@ -3554,7 +3553,6 @@ def forward(self, arg0_1):
         self.assertEqual(ref, result)
         self.assertEqual(x_ref.grad, x_test.grad)
 
-    @unittest.skipIf(not TEST_ACCELERATOR, "Accelerator not available")
     def test_multiple_user_phase_annotations_errors(self):
         x = torch.randn(4, 4, requires_grad=True)
         w = torch.randn(4, 4, requires_grad=True)
@@ -3575,7 +3573,6 @@ def forward(self, arg0_1):
         with self.assertRaisesRegex(RuntimeError, "backward regions annotated"):
             self._compile_and_capture(fn, True, (x, w))
 
-    @unittest.skipIf(not TEST_ACCELERATOR, "Accelerator not available")
     def test_user_phase_annotation_with_extra_autograd_grad(self):
         """Only the user-annotated backward region gets rematerialization."""
         x = torch.randn(4, 4, requires_grad=True)
