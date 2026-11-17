@@ -322,21 +322,10 @@ class autocast:
         # only dispatch to PreDispatchTorchFunctionMode to avoid exposing this
         # API to other functional modes. We only expose to PreDispatchTorchFunctionMode
         # for preserving autocast in torch.export.export.
-        if torch._C._is_torch_function_mode_enabled():
-            stacks = torch.overrides._get_current_function_mode_stack()
-            for mode in stacks:
-                if isinstance(
-                    mode,
-                    torch.fx.experimental.proxy_tensor.PreDispatchTorchFunctionMode,
-                ):
-                    args = (
-                        self.device,
-                        self.fast_dtype,
-                        self._enabled,
-                        self._cache_enabled,
-                    )
-                    mode.__torch_function__(torch.amp._enter_autocast, (), args)
-                    return self
+        pre_dispatch_mode = _pre_dispatch_mode()
+        if pre_dispatch_mode is not None:
+            args = (self.device, self.fast_dtype, self._enabled, self._cache_enabled)
+            pre_dispatch_mode.__torch_function__(torch.amp._enter_autocast, (), args)
 
         return self
 
@@ -354,17 +343,9 @@ class autocast:
         # only dispatch to PreDispatchTorchFunctionMode to avoid exposing this
         # API to other functional modes. We only expose to PreDispatchTorchFunctionMode
         # for preserving autocast in torch.export.export.
-        if torch._C._is_torch_function_mode_enabled():
-            stacks = torch.overrides._get_current_function_mode_stack()
-            for mode in stacks:
-                if isinstance(
-                    mode,
-                    torch.fx.experimental.proxy_tensor.PreDispatchTorchFunctionMode,
-                ):
-                    mode.__torch_function__(torch.amp._exit_autocast, (), ())
-                    # This is very important because the above line actually doesn't
-                    # run exit code so it end up swallowing exceptions.
-                    return False
+        pre_dispatch_mode = _pre_dispatch_mode()
+        if pre_dispatch_mode is not None:
+            pre_dispatch_mode.__torch_function__(torch.amp._exit_autocast, (), ())
         return False
 
     def __call__(self, func):
@@ -385,11 +366,43 @@ class _UnmanagedAutocast(autocast):
     pass
 
 
+def _pre_dispatch_mode():
+    if not torch._C._is_torch_function_mode_enabled():
+        return None
+    for mode in reversed(torch.overrides._get_current_function_mode_stack()):
+        if isinstance(
+            mode, torch.fx.experimental.proxy_tensor.PreDispatchTorchFunctionMode
+        ):
+            return mode
+    return None
+
+
+def _current_pre_dispatch_mode():
+    # Modes above the pre-dispatch mode, such as the one that records torch_fn
+    # metadata, see _enter_autocast and _exit_autocast first and then call
+    # them again.
+    mode = _pre_dispatch_mode()
+    return mode if mode is torch.overrides._get_current_function_mode() else None
+
+
 # These functions aren't meant for public usage.
 # They are what we trace into a graph during pre_dispatch tracing
 # when we encounter an autocast context manager.
 def _enter_autocast(*vals):
-    # For pre-dispatch tracing, if a TorchFunction mode is active, we'll want to trace this into a graph.
+    # A Dynamo graph traced in pre-dispatch mode (strict export or a control
+    # flow branch) replays these calls. Enter the autocast as well, like
+    # autocast.__enter__ does, so that the traced ops see it. If tracing fails
+    # before the matching _exit_autocast, the tracer restores the autocast
+    # state from the start of tracing.
+    pre_dispatch_mode = _current_pre_dispatch_mode()
+    if pre_dispatch_mode is not None:
+        mode = _UnmanagedAutocast(*vals)
+        with torch._C.DisableTorchFunction():
+            mode.__enter__()
+        pre_dispatch_mode.entered_autocasts.append(mode)
+        pre_dispatch_mode.__torch_function__(torch.amp._enter_autocast, (), vals)
+        return mode
+    # Other TorchFunction modes may want to trace this call into their graph.
     if torch._C._is_torch_function_mode_enabled():
         return torch.overrides.handle_torch_function(
             torch.amp._enter_autocast, [], *vals
@@ -400,6 +413,16 @@ def _enter_autocast(*vals):
 
 
 def _exit_autocast(mode):
+    pre_dispatch_mode = _current_pre_dispatch_mode()
+    if pre_dispatch_mode is not None:
+        entered = pre_dispatch_mode.entered_autocasts
+        if not entered or entered[-1] is not mode:
+            raise AssertionError("_exit_autocast must exit the latest _enter_autocast")
+        entered.pop()
+        with torch._C.DisableTorchFunction():
+            mode.__exit__(None, None, None)
+        pre_dispatch_mode.__torch_function__(torch.amp._exit_autocast, (), ())
+        return
     if torch._C._is_torch_function_mode_enabled():
         return torch.overrides.handle_torch_function(torch.amp._exit_autocast, [], mode)
     mode.__exit__(None, None, None)
