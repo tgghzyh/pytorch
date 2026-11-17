@@ -326,6 +326,7 @@ class PyCodegen:
             ):
                 return self(value.source)
 
+        const = (False, None)
         if isinstance(value, ComputedLazyConstantVariable) and not value.is_realized():
             # Recompute from the operands at runtime instead of burning in the value
             self.uses[value] += 1
@@ -333,10 +334,12 @@ class PyCodegen:
             if allow_cache and value in self.tempvars:
                 self._output.append(create_dup_top())
                 self.add_cache(value)
-        elif value.is_python_constant() and is_safe_constant(
-            value.as_python_constant()
+        elif (
+            value.is_python_constant()
+            and (const := value.try_as_python_constant())[0]
+            and is_safe_constant(const[1])
         ):
-            output.append(self.create_load_const(value.as_python_constant()))
+            output.append(self.create_load_const(const[1]))
         elif isinstance(value, TensorWithTFOverrideVariable):
             graph_outputs_key = self.add_graph_output(value)
 
@@ -401,7 +404,7 @@ class PyCodegen:
                 output.extend(create_call_function(0, False))
             elif isinstance(value, CustomClassObjectVariable):
                 try:
-                    py_value = value.as_python_constant()
+                    py_value = const[1] if const[0] else value.as_python_constant()
                 except NotImplementedError:
                     py_value = None
 
