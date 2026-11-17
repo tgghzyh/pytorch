@@ -1884,6 +1884,24 @@ SeqNr|OrigAten|SrcFn|FwdSrcFn
         self.assertEqual(mod.buffer, ref_mod.buffer)
         self.assertEqual(compiler.frame_count, 2)
 
+    def test_input_mutation_storage_overlap_skips_assume_constant_result_tensor(self):
+        # The result becomes a graph input with a ConstantSource.
+        @torch._dynamo.assume_constant_result
+        def get_const():
+            return torch.ones(4)
+
+        def f(x, index, src):
+            x.index_copy_(0, index, src)
+            return x + get_const()
+
+        index = torch.tensor([0, 2])
+        src = torch.ones(2)
+        x, x_ref = torch.zeros(4), torch.zeros(4)
+        opt_out = torch.compile(f, backend="aot_eager", fullgraph=True)(x, index, src)
+        ref_out = f(x_ref, index, src)
+        self.assertEqual(opt_out, ref_out)
+        self.assertEqual(x, x_ref)
+
     def test_inputs_overlapping_with_mutation_stress(self):
         # Stress test for StorageOverlap guard.
         #

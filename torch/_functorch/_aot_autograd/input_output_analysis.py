@@ -21,7 +21,7 @@ from torch._C._dynamo.guards import (
     compute_overlapping_tensors,
 )
 from torch._functorch._aot_autograd.schemas import PlainTensorMeta
-from torch._guards import StorageOverlapPartition
+from torch._guards import GuardSource, StorageOverlapPartition
 from torch._subclasses.functional_tensor import FunctionalTensor
 from torch.fx.experimental.symbolic_shapes import is_concrete_int
 
@@ -434,6 +434,10 @@ def add_input_mutation_storage_overlap_partition_guard(
     for i, inpt in enumerate(fwd_inputs):
         source = sources[i]
         if not isinstance(inpt, Tensor) or source is None or source in seen_sources:
+            continue
+        # Constant-sourced inputs are owned by the compiled graph, so their
+        # overlap cannot change, and their names may not resolve in the frame.
+        if source.guard_source is GuardSource.CONSTANT:
             continue
         tensor_indices.append(i)
         seen_sources.add(source)
