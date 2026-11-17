@@ -2372,14 +2372,8 @@ class triton:
         default=True,
     )
 
-    # limit tiling dimensions
-    #   - max_tiles=1 disables tiling
-    #   - max_tiles=2
-    #   - max_tiles=3 is experimental and may have bugs
-    # higher values are unsupported
-
-    #  We use a max of 3 if coalesce_tiling_analysis is True, and 2 otherwise.
-    #  Note - coalesce_tiling_analysis does not yet apply to dynamic shapes.
+    # Maximum number of tiling dimensions for pointwise and reduction axes separately.
+    # The actual number depends on other tiling settings and heuristics.
     max_tiles: int | None = None
 
     # Prefer higher dimensional tilings. This simplifies indexing expressions, making

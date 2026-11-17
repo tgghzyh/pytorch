@@ -2,6 +2,7 @@
 import copy
 import itertools
 import logging
+import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -17,12 +18,13 @@ from .hints import (
     TRITON_MAX_BLOCK,
     TRITON_MAX_TENSOR_NUMEL,
 )
-from .runtime_utils import red_text, triton_config_to_hashable
+from .runtime_utils import ceildiv, get_max_y_grid, red_text, triton_config_to_hashable
 from .tiling import (
     block_to_prefix,
     get_max_block,
     get_pointwise_prefixes,
     get_reduction_prefixes,
+    get_z_prefixes,
     pointwise_prefixes,
     reduction_prefixes,
 )
@@ -278,6 +280,21 @@ class CoordescTuner:
         return test is not None and test < baseline * (1 - threshold)
 
     def is_valid_config(self, config) -> bool:
+        if (
+            not self.is_mm
+            and not self.is_native_matmul
+            and self.size_hints
+            and (z_prefixes := get_z_prefixes(self.size_hints))
+        ):
+            groups = (("y",), z_prefixes)
+            for group in groups:
+                if all(f"{p.upper()}BLOCK" in config.kwargs for p in group):
+                    grid = math.prod(
+                        ceildiv(self.size_hints[p], config.kwargs[f"{p.upper()}BLOCK"])
+                        for p in group
+                    )
+                    if grid > get_max_y_grid():
+                        return False
         if self.is_mix_order_reduction:
             split_size = config.kwargs["RSPLIT_SIZE"]
             rnumel_hint = (
